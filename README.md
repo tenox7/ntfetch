@@ -5,6 +5,8 @@ Unlike neofetch it is a graphical app: one window, in the style of the NT 4.0 `w
 
 It runs on every Windows NT, from NT 3.1 to Windows 11.
 
+![ntfetch on Windows NT 4.0 Server, a MIPS RM300 with 4 CPUs](ntfetch.png)
+
 ## What it shows
 
 - `user@HOST` as the title
