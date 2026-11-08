@@ -17,6 +17,10 @@ It runs on every Windows NT, from NT 3.1 to Windows 11.
 - CPUs: how many, name and speed, like `4 x MIPS-R4400 @ 150 MHz`
 - One chip icon per CPU, showing its type
 - Memory
+- IP addresses, like `ipconfig`
+
+NT 4.0 SP4 and later show the IP addresses in use now.
+Older NT shows the addresses set in the network settings.
 
 The chips sit on top, four to a row.
 The chip icons come from [WinTown](https://github.com/tenox7/WinTown) and [NT Games](https://github.com/tenox7/ntgames):

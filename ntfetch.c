@@ -1,7 +1,8 @@
 /*
  * ntfetch.c - neofetch for Windows NT, as one small window in the style of
  * the NT 4.0 winmsd: OS, version, build, service pack, system, BIOS, screen
- * resolution, CPU type, number of CPUs with a chip icon for each, and memory.
+ * resolution, CPU type, number of CPUs with a chip icon for each, memory and
+ * IP addresses.
  *
  * Runs on every Windows NT from 3.1 to 11. Anything newer than NT 3.1 is
  * looked up at run time. ntfetch --text prints the same to standard output.
@@ -32,7 +33,8 @@
 
 #define TEXT_SIZE 256
 #define REG_SIZE 1024
-#define MAX_FIELDS 9
+#define MAX_ADDRESSES 8
+#define MAX_FIELDS (9 + MAX_ADDRESSES)
 
 /* Window layout, in pixels */
 #define MARGIN 12
@@ -51,6 +53,12 @@
 #define KEY_SYSTEM "HARDWARE\\DESCRIPTION\\System"
 #define KEY_BIOS "HARDWARE\\DESCRIPTION\\System\\BIOS"
 #define KEY_CPU "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0"
+#define KEY_SERVICES "SYSTEM\\CurrentControlSet\\Services"
+#define KEY_TCPIP_LINKAGE KEY_SERVICES "\\Tcpip\\Linkage"
+
+/* MIB_IPADDRROW types */
+#define IPADDR_DISCONNECTED 0x0008
+#define IPADDR_DELETED 0x0040
 
 /* CPU architectures, numbered as PROCESSOR_ARCHITECTURE_* */
 #define ARCH_X86 0
@@ -109,6 +117,22 @@ typedef struct {
     DWORD unused[12];
 } MEMINFOEX;
 
+/* MIB_IPADDRROW and MIB_IPADDRTABLE of the IP Helper API */
+typedef struct {
+    DWORD address;
+    DWORD index;
+    DWORD mask;
+    DWORD broadcast;
+    DWORD reassemblySize;
+    WORD unused;
+    WORD type;
+} IPADDRROW;
+
+typedef struct {
+    DWORD count;
+    IPADDRROW rows[1];
+} IPADDRTABLE;
+
 typedef LONG (WINAPI *FN_RTLGETVERSION)(OSINFOW *);
 typedef BOOL (WINAPI *FN_GETVERSIONEXA)(OSINFOA *);
 typedef void (WINAPI *FN_GETNATIVESYSTEMINFO)(SYSTEM_INFO *);
@@ -117,10 +141,12 @@ typedef BOOL (WINAPI *FN_ISWOW64PROCESS2)(HANDLE, USHORT *, USHORT *);
 typedef DWORD (WINAPI *FN_GETACTIVEPROCESSORCOUNT)(WORD);
 typedef BOOL (WINAPI *FN_GLOBALMEMORYSTATUSEX)(MEMINFOEX *);
 typedef BOOL (WINAPI *FN_ATTACHCONSOLE)(DWORD);
+typedef DWORD (WINAPI *FN_GETIPADDRTABLE)(IPADDRTABLE *, DWORD *, BOOL);
 
 static char title[TEXT_SIZE];
 static FIELD fields[MAX_FIELDS];
 static int fieldCount;
+static int addressCount;
 static int cpuArch;
 static int cpuCount;
 static int cpuIconId;
@@ -321,6 +347,26 @@ static BOOL readRegNumber(char *path, char *name, DWORD *number)
         return FALSE;
     }
     *number = regData.number;
+    return TRUE;
+}
+
+/* Read a REG_SZ or REG_MULTI_SZ value into out, REG_SIZE bytes, as strings that end with an empty one */
+static BOOL readRegList(char *path, char *name, char *out)
+{
+    DWORD type;
+    DWORD size;
+    DWORD i;
+
+    out[0] = '\0';
+    out[1] = '\0';
+    type = readRegValue(path, name, &size);
+    if (type != REG_SZ && type != REG_MULTI_SZ) {
+        return FALSE;
+    }
+    /* with the two terminators readRegValue adds */
+    for (i = 0; i < size + 2; i++) {
+        out[i] = regData.text[i];
+    }
     return TRUE;
 }
 
@@ -801,6 +847,147 @@ static char *addField(char *label)
     return field->value;
 }
 
+/* One line per IPv4 address. The loopback and unset ones are left out. */
+static void addAddress(char *address)
+{
+    if (address[0] == '\0' || lstrcmp(address, "0.0.0.0") == 0 || startsWith(address, "127.")) {
+        return;
+    }
+    addressCount++;
+    if (addressCount > MAX_ADDRESSES) {
+        return;     /* the last line counts them */
+    }
+    copyText(addField(addressCount == 1 ? "IP Address:" : ""), address, TEXT_SIZE);
+}
+
+/* An address in network byte order, as 192.168.1.10 */
+static void formatAddress(DWORD address, char *out)
+{
+    BYTE *part;
+
+    part = (BYTE *)&address;
+    wsprintf(out, "%d.%d.%d.%d", (int)part[0], (int)part[1], (int)part[2], (int)part[3]);
+}
+
+/* The addresses in use now, from the IP Helper API of NT 4.0 SP4 and later. FALSE when it is not there. */
+static BOOL getIpHelperAddresses(OSDATA *os)
+{
+    FN_GETIPADDRTABLE getIpAddrTable;
+    HMODULE library;
+    IPADDRTABLE *table;
+    IPADDRROW *row;
+    char path[TEXT_SIZE];
+    char address[TEXT_SIZE];
+    DWORD size;
+    DWORD result;
+    DWORD i;
+    UINT length;
+    int tries;
+
+    /* by its full path: older NT would look for it along the PATH, floppy drives too */
+    length = GetSystemDirectory(path, TEXT_SIZE);
+    if (length == 0 || length > TEXT_SIZE - 16) {
+        return FALSE;
+    }
+    appendText(path, "\\iphlpapi.dll", TEXT_SIZE);
+    library = LoadLibrary(path);
+    if (library == NULL) {
+        return FALSE;
+    }
+    getIpAddrTable = (FN_GETIPADDRTABLE)GetProcAddress(library, "GetIpAddrTable");
+    table = NULL;
+    size = sizeof(IPADDRTABLE);
+    result = ERROR_INSUFFICIENT_BUFFER;
+    /* a buffer too small gets the size it needs; an address can come up in between */
+    for (tries = 0; tries < 4 && getIpAddrTable != NULL && result == ERROR_INSUFFICIENT_BUFFER; tries++) {
+        if (table != NULL) {
+            LocalFree((HLOCAL)table);
+        }
+        table = (IPADDRTABLE *)LocalAlloc(LMEM_FIXED, size);
+        if (table == NULL) {
+            break;
+        }
+        result = getIpAddrTable(table, &size, FALSE);
+    }
+    if (table != NULL && result == ERROR_SUCCESS) {
+        for (i = 0; i < table->count; i++) {
+            row = &table->rows[i];
+            /* Windows 2000 and later list the addresses of unplugged adapters too */
+            if (os->major >= 5 && (row->type & (IPADDR_DISCONNECTED | IPADDR_DELETED)) != 0) {
+                continue;
+            }
+            formatAddress(row->address, address);
+            addAddress(address);
+        }
+    }
+    if (table != NULL) {
+        LocalFree((HLOCAL)table);
+    }
+    FreeLibrary(library);
+    return result == ERROR_SUCCESS;
+}
+
+/* The addresses of one adapter, a list in the registry */
+static void addRegAddresses(char *path, char *name)
+{
+    char addresses[REG_SIZE];
+    char *address;
+
+    if (!readRegList(path, name, addresses)) {
+        return;
+    }
+    for (address = addresses; *address != '\0'; address += lstrlen(address) + 1) {
+        addAddress(address);
+    }
+}
+
+/* NT 3.1 to 4.0 without the IP Helper: the addresses set for each adapter that TCP/IP is bound to */
+static void getRegistryAddresses(void)
+{
+    char adapters[REG_SIZE];
+    char path[TEXT_SIZE];
+    char *adapter;
+    char *name;
+    char *c;
+    DWORD dhcp;
+
+    if (!readRegList(KEY_TCPIP_LINKAGE, "Bind", adapters)) {
+        return;
+    }
+    for (adapter = adapters; *adapter != '\0'; adapter += lstrlen(adapter) + 1) {
+        /* \Device\Elnk31 is the adapter Elnk31 */
+        name = adapter;
+        for (c = adapter; *c != '\0'; c++) {
+            if (*c == '\\') {
+                name = c + 1;
+            }
+        }
+        copyText(path, KEY_SERVICES "\\", TEXT_SIZE);
+        appendText(path, name, TEXT_SIZE);
+        appendText(path, "\\Parameters\\Tcpip", TEXT_SIZE);
+        /* NT 3.5 and later can get it from DHCP */
+        if (readRegNumber(path, "EnableDHCP", &dhcp) && dhcp != 0) {
+            addRegAddresses(path, "DhcpIPAddress");
+        } else {
+            addRegAddresses(path, "IPAddress");
+        }
+    }
+}
+
+/* The IPv4 addresses, like ipconfig, one line each */
+static void getAddresses(OSDATA *os)
+{
+    if (!getIpHelperAddresses(os)) {
+        getRegistryAddresses();
+    }
+    if (addressCount == 0) {
+        copyText(addField("IP Address:"), "None", TEXT_SIZE);
+    }
+    if (addressCount > MAX_ADDRESSES) {
+        wsprintf(fields[fieldCount - 1].value, "and %d more", addressCount - MAX_ADDRESSES + 1);
+    }
+}
+
 static void collectInfo(void)
 {
     OSDATA os;
@@ -823,6 +1010,7 @@ static void collectInfo(void)
     getResolution(&os, addField("Resolution:"));
     getCpuText(&system, addField("CPUs:"));
     getMemoryText(addField("Memory:"));
+    getAddresses(&os);
 }
 
 /* Write to the --text output; a console shows the OEM code page */
