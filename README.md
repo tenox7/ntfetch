@@ -72,3 +72,12 @@ Where the exe runs depends on the compiler:
 For RISC (MIPS, Alpha, PowerPC, ARM, Itanium) build with that platform's compiler,
 as for [WinTown](https://github.com/tenox7/WinTown#compile-for-risc).
 
+
+For PINT, Windows NT on the Raspberry Pi, build with the PINT SDK in Docker
+([tenox7/pint40sdk](https://hub.docker.com/r/tenox7/pint40sdk) for PINT 4.0,
+[tenox7/pint35sdk](https://hub.docker.com/r/tenox7/pint35sdk) for PINT 3.5;
+its page tells how to set it up once):
+
+```
+docker run --rm -v msvc-arm32:/opt/msvc -v "$PWD":/src tenox7/pint40sdk nmake
+```

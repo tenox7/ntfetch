@@ -704,6 +704,10 @@ static int typeArch(DWORD type)
     case 604:
     case 620:
         return ARCH_PPC;
+    case 0xC07:     /* ARM Cortex-A7, A53 and A72: Windows NT on the Raspberry Pi (PINT) */
+    case 0xD03:
+    case 0xD08:
+        return ARCH_ARM;
     }
     return ARCH_X86;
 }
